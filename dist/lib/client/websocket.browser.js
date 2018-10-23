@@ -80,11 +80,16 @@ var WebSocket = function (_EventEmitter) {
     (0, _createClass3.default)(WebSocket, [{
         key: "send",
         value: function send(data, options, callback) {
-            callback = callback || options;
+            if (typeof options === "function") {
+                callback = callback || options;
+                options = {};
+            }
 
             try {
                 this.socket.send(data);
-                callback();
+                if (callback) {
+                    callback();
+                }
             } catch (error) {
                 callback(error);
             }

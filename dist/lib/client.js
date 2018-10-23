@@ -99,6 +99,7 @@ exports.default = function (WebSocket) {
             var _this = (0, _possibleConstructorReturn3.default)(this, (Client.__proto__ || (0, _getPrototypeOf2.default)(Client)).call(this));
 
             _this.queue = {};
+            _this.rpc_methods = {};
             _this.rpc_id = 0;
 
             _this.address = address;
@@ -148,7 +149,7 @@ exports.default = function (WebSocket) {
                 var _this2 = this;
 
                 (0, _assertArgs2.default)(arguments, {
-                    "method": "string",
+                    method: "string",
                     "[params]": ["object", Array],
                     "[timeout]": "number",
                     "[ws_opts]": "object"
@@ -184,6 +185,28 @@ exports.default = function (WebSocket) {
                         }
                     });
                 });
+            }
+
+            /**
+             * Registers an RPC method.
+             * @method
+             * @param {String} name - method name
+             * @param {Function} fn - a callee function
+             * @param {String} ns - namespace identifier
+             * @throws {TypeError}
+             * @return {Undefined}
+             */
+
+        }, {
+            key: "register",
+            value: function register(name, fn) {
+                (0, _assertArgs2.default)(arguments, {
+                    name: "string",
+                    fn: "function",
+                    "[ns]": "string"
+                });
+
+                this.rpc_methods[name] = fn;
             }
 
             /**
@@ -235,7 +258,7 @@ exports.default = function (WebSocket) {
                 var _this3 = this;
 
                 (0, _assertArgs2.default)(arguments, {
-                    "method": "string",
+                    method: "string",
                     "[params]": ["object", Array]
                 });
 
@@ -402,39 +425,143 @@ exports.default = function (WebSocket) {
                     _this4.current_reconnects = 0;
                 });
 
-                this.socket.on("message", function (message) {
-                    if (message instanceof ArrayBuffer) message = Buffer.from(message).toString();
+                this.socket.on("message", function () {
+                    var _ref5 = (0, _asyncToGenerator3.default)( /*#__PURE__*/_regenerator2.default.mark(function _callee4(message) {
+                        var args, i, response;
+                        return _regenerator2.default.wrap(function _callee4$(_context4) {
+                            while (1) {
+                                switch (_context4.prev = _context4.next) {
+                                    case 0:
+                                        if (message instanceof ArrayBuffer) message = Buffer.from(message).toString();
 
-                    try {
-                        message = _circularJson2.default.parse(message);
-                    } catch (error) {
-                        return;
-                    }
+                                        _context4.prev = 1;
 
-                    // check if any listeners are attached and forward event
-                    if (message.notification && _this4.listeners(message.notification).length) {
-                        if (!(0, _keys2.default)(message.params).length) return _this4.emit(message.notification);
+                                        message = _circularJson2.default.parse(message);
+                                        _context4.next = 8;
+                                        break;
 
-                        var args = [message.notification];
+                                    case 5:
+                                        _context4.prev = 5;
+                                        _context4.t0 = _context4["catch"](1);
+                                        return _context4.abrupt("return");
 
-                        if (message.params.constructor === Object) args.push(message.params);else
-                            // using for-loop instead of unshift/spread because performance is better
-                            for (var i = 0; i < message.params.length; i++) {
-                                args.push(message.params[i]);
-                            }return _this4.emit.apply(_this4, args);
-                    }
+                                    case 8:
+                                        if (!(message.notification && _this4.listeners(message.notification).length)) {
+                                            _context4.next = 14;
+                                            break;
+                                        }
 
-                    if (!_this4.queue[message.id]) {
-                        // general JSON RPC 2.0 events
-                        if (message.method && message.params) return _this4.emit(message.method, message.params);else return;
-                    }
+                                        if ((0, _keys2.default)(message.params).length) {
+                                            _context4.next = 11;
+                                            break;
+                                        }
 
-                    if (_this4.queue[message.id].timeout) clearTimeout(_this4.queue[message.id].timeout);
+                                        return _context4.abrupt("return", _this4.emit(message.notification));
 
-                    if (message.error) _this4.queue[message.id].promise[1](message.error);else _this4.queue[message.id].promise[0](message.result);
+                                    case 11:
+                                        args = [message.notification];
 
-                    _this4.queue[message.id] = null;
-                });
+
+                                        if (message.params.constructor === Object) args.push(message.params);
+                                        // using for-loop instead of unshift/spread because performance is better
+                                        else for (i = 0; i < message.params.length; i++) {
+                                                args.push(message.params[i]);
+                                            }return _context4.abrupt("return", _this4.emit.apply(_this4, args));
+
+                                    case 14:
+                                        if (!(message.method && _this4.rpc_methods[message.method])) {
+                                            _context4.next = 31;
+                                            break;
+                                        }
+
+                                        response = null;
+                                        _context4.prev = 16;
+                                        _context4.next = 19;
+                                        return _this4.rpc_methods[message.method](message.params);
+
+                                    case 19:
+                                        response = _context4.sent;
+                                        _context4.next = 29;
+                                        break;
+
+                                    case 22:
+                                        _context4.prev = 22;
+                                        _context4.t1 = _context4["catch"](16);
+
+                                        if (message.id) {
+                                            _context4.next = 26;
+                                            break;
+                                        }
+
+                                        return _context4.abrupt("return");
+
+                                    case 26:
+                                        if (!(_context4.t1 instanceof Error)) {
+                                            _context4.next = 28;
+                                            break;
+                                        }
+
+                                        return _context4.abrupt("return", {
+                                            jsonrpc: "2.0",
+                                            error: {
+                                                code: -32000,
+                                                message: _context4.t1.name,
+                                                data: _context4.t1.message
+                                            },
+                                            id: message.id
+                                        });
+
+                                    case 28:
+                                        return _context4.abrupt("return", {
+                                            jsonrpc: "2.0",
+                                            error: _context4.t1,
+                                            id: message.id
+                                        });
+
+                                    case 29:
+                                        _this4.socket.send(_circularJson2.default.stringify({
+                                            jsonrpc: "2.0",
+                                            result: response,
+                                            id: message.id
+                                        }), {});
+                                        return _context4.abrupt("return");
+
+                                    case 31:
+                                        if (_this4.queue[message.id]) {
+                                            _context4.next = 37;
+                                            break;
+                                        }
+
+                                        if (!(message.method && message.params)) {
+                                            _context4.next = 36;
+                                            break;
+                                        }
+
+                                        return _context4.abrupt("return", _this4.emit(message.method, message.params));
+
+                                    case 36:
+                                        return _context4.abrupt("return");
+
+                                    case 37:
+
+                                        if (_this4.queue[message.id].timeout) clearTimeout(_this4.queue[message.id].timeout);
+
+                                        if (message.error) _this4.queue[message.id].promise[1](message.error);else _this4.queue[message.id].promise[0](message.result);
+
+                                        _this4.queue[message.id] = null;
+
+                                    case 40:
+                                    case "end":
+                                        return _context4.stop();
+                                }
+                            }
+                        }, _callee4, _this4, [[1, 5], [16, 22]]);
+                    }));
+
+                    return function (_x5) {
+                        return _ref5.apply(this, arguments);
+                    };
+                }());
 
                 this.socket.on("error", function (error) {
                     return _this4.emit("error", error);
