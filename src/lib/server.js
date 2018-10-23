@@ -39,6 +39,8 @@ export default class Server extends EventEmitter
          */
         this.namespaces = {}
 
+        this.queue = {}
+
         this.wss = new WebSocketServer(options)
 
         this.wss.on("listening", () => this.emit("listening"))
@@ -50,10 +52,8 @@ export default class Server extends EventEmitter
             const u = url.parse(request.url, true)
             const ns = u.pathname
 
-            if (u.query.socket_id)
-                socket._id = u.query.socket_id
-            else
-                socket._id = uuid.v1()
+            if (u.query.socket_id) socket._id = u.query.socket_id
+            else socket._id = uuid.v1()
 
             // cleanup after the socket gets disconnected
             socket.on("close", () =>
@@ -64,8 +64,7 @@ export default class Server extends EventEmitter
                 {
                     const index = this.namespaces[ns].events[event].indexOf(socket._id)
 
-                    if (index >= 0)
-                        this.namespaces[ns].events[event].splice(index, 1)
+                    if (index >= 0) this.namespaces[ns].events[event].splice(index, 1)
                 }
             })
 
@@ -94,12 +93,44 @@ export default class Server extends EventEmitter
         assertArgs(arguments, {
             name: "string",
             fn: "function",
-            "[ns]": "string"
+            "[ns]": "string",
         })
 
         if (!this.namespaces[ns]) this._generateNamespace(ns)
 
         this.namespaces[ns].rpc_methods[name] = fn
+    }
+
+    /**
+     * Sends a specified event.
+     * @inner
+     * @method
+     * @param {String} event - event name
+     * @param {Object|Array} params - event parameters
+     * @param {String} ns - namespace identifier
+     * @return {Undefined}
+     */
+    send(event, params, ns = "/")
+    {
+        assertArgs(arguments, {
+            event: "string",
+            "[params]": ["object", Array],
+            "[ns]": "string",
+        })
+
+        if (!this.namespaces[ns]) throw new Error(`namespace is not registered  ${ns}`)
+
+        const socket_ids = [...this.namespaces[ns].clients.keys()]
+
+        for (var i = 0, id; (id = socket_ids[i]); ++i)
+        {
+            this.namespaces[ns].clients.get(id).send(
+                CircularJSON.stringify({
+                    notification: event,
+                    params: params || [],
+                })
+            )
+        }
     }
 
     /**
@@ -112,7 +143,7 @@ export default class Server extends EventEmitter
     closeNamespace(ns)
     {
         assertArgs(arguments, {
-            ns: "string"
+            ns: "string",
         })
 
         var namespace = this.namespaces[ns]
@@ -122,8 +153,7 @@ export default class Server extends EventEmitter
             delete namespace.rpc_methods
             delete namespace.events
 
-            for (const socket of namespace.clients.values())
-                socket.close()
+            for (const socket of namespace.clients.values()) socket.close()
 
             delete this.namespaces[ns]
         }
@@ -140,8 +170,8 @@ export default class Server extends EventEmitter
     event(name, ns = "/")
     {
         assertArgs(arguments, {
-            "name": "string",
-            "[ns]": "string"
+            name: "string",
+            "[ns]": "string",
         })
 
         if (!this.namespaces[ns]) this._generateNamespace(ns)
@@ -149,8 +179,7 @@ export default class Server extends EventEmitter
         {
             const index = this.namespaces[ns].events[name]
 
-            if (index !== undefined)
-                throw new Error(`Already registered event ${ns}${name}`)
+            if (index !== undefined) throw new Error(`Already registered event ${ns}${name}`)
         }
 
         this.namespaces[ns].events[name] = []
@@ -159,21 +188,85 @@ export default class Server extends EventEmitter
         this.on(name, (...params) =>
         {
             // flatten an object if no spreading is wanted
-            if (params.length === 1 && params[0] instanceof Object)
-                params = params[0]
+            if (params.length === 1 && params[0] instanceof Object) params = params[0]
 
             for (const socket_id of this.namespaces[ns].events[name])
             {
                 const socket = this.namespaces[ns].clients.get(socket_id)
 
-                if (!socket)
-                    continue
+                if (!socket) continue
 
-                socket.send(CircularJSON.stringify({
-                    notification: name,
-                    params: params || null
-                }))
+                socket.send(
+                    CircularJSON.stringify({
+                        notification: name,
+                        params: params || null,
+                    })
+                )
             }
+        })
+    }
+
+    /**
+     * Calls a registered RPC method on client.
+     * @method
+     * @param {String} method
+     * @param {Object|Array} params
+     * @param {Number} timeout
+     * @param {Object} ws_opts
+     * @param {String} ns - namespace identifier
+     * @return {Promise}
+     */
+
+    call(method, params, timeout, ws_opts, ns = "/")
+    {
+        assertArgs(arguments, {
+            method: "string",
+            "[params]": ["object", Array],
+            "[timeout]": "number",
+            "[ws_opts]": "object",
+        })
+
+        if (!ws_opts && "object" === typeof timeout)
+        {
+            ws_opts = timeout
+            timeout = null
+        }
+
+        if (!this.namespaces[ns] && this.namespaces[ns].clients.length > 0)
+        {
+            return Promise.reject(`The namespace does not exist or there are not clients connected
+                to the namespace`)
+        }
+        const client_id = Array.from(this.namespaces[ns].clients.keys())[0]
+        const socket = this.namespaces[ns].clients.get(client_id)
+
+        return new Promise((resolve, reject) =>
+        {
+            // if (!this.ready) return reject(new Error("socket not ready"))
+
+            const rpc_id = uuid.v1()
+
+            const message = {
+                jsonrpc: "2.0",
+                method: method,
+                params: params || null,
+                id: rpc_id,
+            }
+
+            socket.send(JSON.stringify(message), ws_opts, (error) =>
+            {
+                if (error) return reject(error)
+                this.queue[rpc_id] = { promise: [resolve, reject] }
+
+                if (timeout)
+                {
+                    this.queue[rpc_id].timeout = setTimeout(() =>
+                    {
+                        this.queue[rpc_id] = null
+                        reject(new Error("reply timeout"))
+                    }, timeout)
+                }
+            })
         })
     }
 
@@ -187,7 +280,7 @@ export default class Server extends EventEmitter
     of(name)
     {
         assertArgs(arguments, {
-            "name": "string",
+            name: "string",
         })
 
         if (!this.namespaces[name]) this._generateNamespace(name)
@@ -198,14 +291,11 @@ export default class Server extends EventEmitter
             // self.register convenience method
             register(fn_name, fn)
             {
-                if (arguments.length !== 2)
-                    throw new Error("must provide exactly two arguments")
+                if (arguments.length !== 2) throw new Error("must provide exactly two arguments")
 
-                if (typeof fn_name !== "string")
-                    throw new Error("name must be a string")
+                if (typeof fn_name !== "string") throw new Error("name must be a string")
 
-                if (typeof fn !== "function")
-                    throw new Error("handler must be a function")
+                if (typeof fn !== "function") throw new Error("handler must be a function")
 
                 self.register(fn_name, fn, name)
             },
@@ -213,13 +303,17 @@ export default class Server extends EventEmitter
             // self.event convenience method
             event(ev_name)
             {
-                if (arguments.length !== 1)
-                    throw new Error("must provide exactly one argument")
+                if (arguments.length !== 1) throw new Error("must provide exactly one argument")
 
-                if (typeof ev_name !== "string")
-                    throw new Error("name must be a string")
+                if (typeof ev_name !== "string") throw new Error("name must be a string")
 
                 self.event(ev_name, name)
+            },
+
+            call(method, params, timeout, ws_opts)
+            {
+                // TODO:(felix) error handling
+                return self.call(method, params, timeout, ws_opts, name)
             },
 
             // self.eventList convenience method
@@ -229,14 +323,14 @@ export default class Server extends EventEmitter
             },
 
             /**
-             * Emits a specified event to this namespace.
+             * Sends a specified event to this namespace.
              * @inner
              * @method
              * @param {String} event - event name
              * @param {Array} params - event parameters
              * @return {Undefined}
              */
-            emit(event, params)
+            send(event, params)
             {
                 const socket_ids = [ ...self.namespaces[name].clients.keys() ]
 
@@ -270,9 +364,9 @@ export default class Server extends EventEmitter
             connected()
             {
                 const clients = {}
-                const socket_ids = [ ...self.namespaces[name].clients.keys() ]
+                const socket_ids = [...self.namespaces[name].clients.keys()]
 
-                for (var i = 0, id; id = socket_ids[i]; ++i)
+                for (var i = 0, id; (id = socket_ids[i]); ++i)
                     clients[id] = self.namespaces[name].clients.get(id)
 
                 return clients
@@ -287,7 +381,7 @@ export default class Server extends EventEmitter
             clients()
             {
                 return self.namespaces[name]
-            }
+            },
         }
     }
 
@@ -320,15 +414,15 @@ export default class Server extends EventEmitter
     createError(code, message, data)
     {
         assertArgs(arguments, {
-            "code": "number",
-            "message": "string",
-            "[data]": ["string", "object"]
+            code: "number",
+            message: "string",
+            "[data]": ["string", "object"],
         })
 
         return {
             code: code,
             message: message,
-            data: data || null
+            data: data || null,
         }
     }
 
@@ -346,8 +440,10 @@ export default class Server extends EventEmitter
                 this.wss.close()
                 resolve()
             }
-
-            catch (error) { reject(error) }
+            catch (error)
+            {
+                reject(error)
+            }
         })
     }
 
@@ -360,7 +456,7 @@ export default class Server extends EventEmitter
      */
     _handleRPC(socket, ns = "/")
     {
-        socket.on("message", async(data) =>
+        socket.on("message", async (data) =>
         {
             const msg_options = {}
 
@@ -371,25 +467,37 @@ export default class Server extends EventEmitter
                 data = Buffer.from(data).toString()
             }
 
-            try { data = JSON.parse(data) }
-
+            try
+            {
+                data = JSON.parse(data)
+            }
             catch (error)
             {
-                return socket.send(JSON.stringify({
-                    jsonrpc: "2.0",
-                    error: utils.createError(-32700, error.toString()),
-                    id: data.id || null
-                }, msg_options))
+                return socket.send(
+                    JSON.stringify(
+                        {
+                            jsonrpc: "2.0",
+                            error: utils.createError(-32700, error.toString()),
+                            id: data.id || null,
+                        },
+                        msg_options
+                    )
+                )
             }
 
             if (Array.isArray(data))
             {
                 if (!data.length)
-                    return socket.send(JSON.stringify({
-                        jsonrpc: "2.0",
-                        error: utils.createError(-32600, "Invalid array"),
-                        id: null
-                    }, msg_options))
+                    return socket.send(
+                        JSON.stringify(
+                            {
+                                jsonrpc: "2.0",
+                                error: utils.createError(-32600, "Invalid array"),
+                                id: null,
+                            },
+                            msg_options
+                        )
+                    )
 
                 const responses = []
 
@@ -397,22 +505,19 @@ export default class Server extends EventEmitter
                 {
                     const response = await this._runMethod(message, socket._id, ns)
 
-                    if (!response)
-                        continue
+                    if (!response) continue
 
                     responses.push(response)
                 }
 
-                if (!responses.length)
-                    return
+                if (!responses.length) return
 
                 return socket.send(CircularJSON.stringify(responses), msg_options)
             }
 
             const response = await this._runMethod(data, socket._id, ns)
 
-            if (!response)
-                return
+            if (!response) return
 
             return socket.send(CircularJSON.stringify(response), msg_options)
         })
@@ -432,35 +537,46 @@ export default class Server extends EventEmitter
             return {
                 jsonrpc: "2.0",
                 error: utils.createError(-32600),
-                id: null
+                id: null,
             }
 
         if (message.jsonrpc !== "2.0")
             return {
                 jsonrpc: "2.0",
                 error: utils.createError(-32600, "Invalid JSON RPC version"),
-                id: message.id || null
+                id: message.id || null,
             }
+
+        // Custom bi-direction implementation
+        if (this.queue[message.id])
+        {
+            if (this.queue[message.id].timeout) clearTimeout(this.queue[message.id].timeout)
+            if (message.error) this.queue[message.id].promise[1](message.error)
+            else this.queue[message.id].promise[0](message.result)
+
+            this.queue[message.id] = null
+            return
+        }
 
         if (!message.method)
             return {
                 jsonrpc: "2.0",
                 error: utils.createError(-32602, "Method not specified"),
-                id: message.id || null
+                id: message.id || null,
             }
 
         if (typeof message.method !== "string")
             return {
                 jsonrpc: "2.0",
                 error: utils.createError(-32600, "Invalid method name"),
-                id: message.id || null
+                id: message.id || null,
             }
 
         if (message.params && typeof message.params === "string")
             return {
                 jsonrpc: "2.0",
                 error: utils.createError(-32600),
-                id: message.id || null
+                id: message.id || null,
             }
 
         if (message.method === "rpc.on")
@@ -469,7 +585,7 @@ export default class Server extends EventEmitter
                 return {
                     jsonrpc: "2.0",
                     error: utils.createError(-32000),
-                    id: message.id || null
+                    id: message.id || null,
                 }
 
             const results = {}
@@ -501,7 +617,7 @@ export default class Server extends EventEmitter
             return {
                 jsonrpc: "2.0",
                 result: results,
-                id: message.id || null
+                id: message.id || null,
             }
         }
         else if (message.method === "rpc.off")
@@ -510,7 +626,7 @@ export default class Server extends EventEmitter
                 return {
                     jsonrpc: "2.0",
                     error: utils.createError(-32000),
-                    id: message.id || null
+                    id: message.id || null,
                 }
 
             const results = {}
@@ -538,7 +654,7 @@ export default class Server extends EventEmitter
             return {
                 jsonrpc: "2.0",
                 result: results,
-                id: message.id || null
+                id: message.id || null,
             }
         }
 
@@ -547,18 +663,19 @@ export default class Server extends EventEmitter
             return {
                 jsonrpc: "2.0",
                 error: utils.createError(-32601),
-                id: message.id || null
+                id: message.id || null,
             }
         }
 
         let response = null
 
-        try { response = await this.namespaces[ns].rpc_methods[message.method](message.params) }
-
+        try
+        {
+            response = await this.namespaces[ns].rpc_methods[message.method](message.params)
+        }
         catch (error)
         {
-            if (!message.id)
-                return
+            if (!message.id) return
 
             if (error instanceof Error)
                 return {
@@ -566,26 +683,25 @@ export default class Server extends EventEmitter
                     error: {
                         code: -32000,
                         message: error.name,
-                        data: error.message
+                        data: error.message,
                     },
-                    id: message.id
+                    id: message.id,
                 }
 
             return {
                 jsonrpc: "2.0",
                 error: error,
-                id: message.id
+                id: message.id,
             }
         }
 
         // client sent a notification, so we won't need a reply
-        if (!message.id)
-            return
+        if (!message.id) return
 
         return {
             jsonrpc: "2.0",
             result: response,
-            id: message.id
+            id: message.id,
         }
     }
 
@@ -600,10 +716,10 @@ export default class Server extends EventEmitter
     {
         this.namespaces[name] = {
             rpc_methods: {
-                "__listMethods": () => Object.keys(this.namespaces[name].rpc_methods)
+                __listMethods: () => Object.keys(this.namespaces[name].rpc_methods),
             },
             clients: new Map(),
-            events: {}
+            events: {},
         }
     }
 }
